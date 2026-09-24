@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow,noarchive">
+<meta name="referrer" content="no-referrer">
+<title>quarto-lock demo</title>
+<style>
+  :root { color-scheme: light dark; --bg:#f5f5f7; --card:#fff; --fg:#161617; --muted:#6e6e73; --line:#d2d2d7; --accent:#111; --danger:#b42318; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#0f0f10; --card:#18181a; --fg:#f5f5f7; --muted:#a1a1a6; --line:#38383a; --accent:#f5f5f7; --danger:#ff8a80; } }
+  * { box-sizing:border-box; }
+  html,body { margin:0; min-height:100%; background:var(--bg); color:var(--fg); font-family:ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+  body { min-height:100vh; display:grid; place-items:center; padding:24px; }
+  .ql-card { width:min(100%,420px); background:var(--card); border:1px solid var(--line); border-radius:18px; padding:30px; box-shadow:0 18px 50px rgba(0,0,0,.08); }
+  .ql-mark { width:44px; height:44px; border:1px solid var(--line); border-radius:12px; display:grid; place-items:center; margin-bottom:20px; font-size:21px; }
+  h1 { margin:0 0 8px; font-size:1.45rem; letter-spacing:-.02em; }
+  p { margin:0 0 24px; color:var(--muted); line-height:1.5; }
+  label { display:block; margin-bottom:8px; font-size:.9rem; font-weight:650; }
+  .ql-row { display:flex; gap:8px; }
+  input { min-width:0; flex:1; border:1px solid var(--line); background:transparent; color:var(--fg); border-radius:10px; padding:12px 13px; font:inherit; outline:none; }
+  input:focus { border-color:var(--fg); box-shadow:0 0 0 3px color-mix(in srgb,var(--fg) 12%,transparent); }
+  button { border:0; border-radius:10px; padding:12px 16px; font:inherit; font-weight:700; background:var(--accent); color:var(--bg); cursor:pointer; }
+  button:disabled { opacity:.6; cursor:wait; }
+  #error { min-height:1.3em; margin:12px 0 0; font-size:.88rem; color:var(--danger); }
+  .ql-foot { margin-top:22px; font-size:.76rem; color:var(--muted); }
+</style>
+</head>
+<body>
+<main class="ql-card" aria-labelledby="ql-title">
+  <div class="ql-mark" aria-hidden="true">&#128274;</div>
+  <h1 id="ql-title">quarto-lock demo</h1>
+  <p>Enter the public demo password shown in the quarto-lock documentation.</p>
+  <form id="lock-form">
+    <label for="password">Password</label>
+    <div class="ql-row">
+      <input id="password" name="password" type="password" autocomplete="current-password" required autofocus>
+      <button id="submit" type="submit">Unlock</button>
+    </div>
+    <div id="error" role="alert" aria-live="polite"></div>
+  </form>
+  <div class="ql-foot">Protected by Quarto Lock</div>
+</main>
+<script>
+(() => {
+  "use strict";
+  const BUILD_ID = "ac4679761005b004";
+  const SALT = "TpO0s1qIJRoMQTKS58Pxsw";
+  const ITERATIONS = 600000;
+  const ROOT_REL = "./";
+  const PAYLOAD = "index.html.qlock";
+  const KEY_NAME = "quarto-lock:key:" + BUILD_ID;
+  const form = document.getElementById("lock-form");
+  const input = document.getElementById("password");
+  const button = document.getElementById("submit");
+  const error = document.getElementById("error");
+
+  function fromBase64Url(text) {
+    const b64 = text.replace(/-/g, "+").replace(/_/g, "/") + "===".slice((text.length + 3) % 4);
+    const bin = atob(b64);
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  }
+
+  function toBase64Url(bytes) {
+    let bin = "";
+    const u8 = new Uint8Array(bytes);
+    for (let i = 0; i < u8.length; i++) bin += String.fromCharCode(u8[i]);
+    return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+  }
+
+  async function derive(password) {
+    const material = await crypto.subtle.importKey(
+      "raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveKey"]
+    );
+    return crypto.subtle.deriveKey(
+      { name:"PBKDF2", salt:fromBase64Url(SALT), iterations:ITERATIONS, hash:"SHA-256" },
+      material,
+      { name:"AES-GCM", length:256 },
+      true,
+      ["decrypt"]
+    );
+  }
+
+  async function importSessionKey(encoded) {
+    return crypto.subtle.importKey("raw", fromBase64Url(encoded), { name:"AES-GCM" }, true, ["decrypt"]);
+  }
+
+  async function decryptPayload(key) {
+    const url = new URL(PAYLOAD, location.href);
+    url.searchParams.set("qlock-build", BUILD_ID);
+    const response = await fetch(url, { cache:"no-store", credentials:"same-origin" });
+    if (!response.ok) throw new Error("payload");
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    if (bytes.length < 29) throw new Error("payload");
+    const iv = bytes.slice(0, 12);
+    const data = bytes.slice(12);
+    const clear = await crypto.subtle.decrypt({ name:"AES-GCM", iv }, key, data);
+    return new TextDecoder().decode(clear);
+  }
+
+  async function ensureServiceWorker(rawKey) {
+    if (!("serviceWorker" in navigator)) throw new Error("service-worker");
+    const root = new URL(ROOT_REL, location.href);
+    const swUrl = new URL("quarto-lock-sw.js", root);
+    const registration = await navigator.serviceWorker.register(swUrl, { scope: root.pathname });
+    await navigator.serviceWorker.ready;
+
+    if (!navigator.serviceWorker.controller) {
+      await Promise.race([
+        new Promise((resolve) => navigator.serviceWorker.addEventListener("controllerchange", resolve, { once:true })),
+        new Promise((resolve) => setTimeout(resolve, 1500)),
+      ]);
+    }
+
+    const target = navigator.serviceWorker.controller || registration.active;
+    target?.postMessage({ type:"QUARTO_LOCK_SET_KEY", buildId:BUILD_ID, key:rawKey });
+  }
+
+  async function unlockWithKey(key) {
+    const clearHtml = await decryptPayload(key);
+    const raw = await crypto.subtle.exportKey("raw", key);
+    const encoded = toBase64Url(raw);
+    try { sessionStorage.setItem(KEY_NAME, encoded); } catch {}
+    await ensureServiceWorker(encoded);
+    document.open();
+    document.write(clearHtml);
+    document.close();
+  }
+
+  async function trySession() {
+    let encoded = null;
+    try { encoded = sessionStorage.getItem(KEY_NAME); } catch {}
+    if (!encoded) return false;
+    try {
+      await unlockWithKey(await importSessionKey(encoded));
+      return true;
+    } catch {
+      try { sessionStorage.removeItem(KEY_NAME); } catch {}
+      return false;
+    }
+  }
+
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    button.disabled = true;
+    error.textContent = "";
+    try {
+      const key = await derive(input.value);
+      await unlockWithKey(key);
+    } catch {
+      error.textContent = "Incorrect password.";
+      input.select();
+      button.disabled = false;
+    }
+  });
+
+  if (!window.isSecureContext || !window.crypto?.subtle) {
+    error.textContent = "This site must be opened over HTTPS (or localhost).";
+    button.disabled = true;
+    return;
+  }
+
+  trySession().then((unlocked) => {
+    if (!unlocked) input.focus();
+  });
+})();
+</script>
+</body>
+</html>
